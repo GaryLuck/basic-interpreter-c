@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -std=c11 -Wall -Wextra -O2 -g
+CFLAGS = -std=gnu11 -Wall -Wextra -O2 -g
 SRCS = $(wildcard src/*.c)
 OBJS = $(SRCS:.c=.o)
 TARGET = bin/basic-interpreter-c
