@@ -1,0 +1,5 @@
+10 LET A = 5
+20 LET B = 7
+30 PRINT A + B
+40 PRINT "Done"
+50 END

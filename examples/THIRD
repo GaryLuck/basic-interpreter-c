@@ -1,0 +1,9 @@
+10 DIM A(5)
+20 LET A(0) = 10
+30 LET A(1) = A(0) + 5
+40 PRINT A(0)
+50 PRINT A(1)
+60 LET I = 2
+70 LET A(I) = 42
+80 PRINT A(2)
+90 END
