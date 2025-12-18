@@ -1,0 +1,18 @@
+# Build artifacts
+/build/
+bin/
+obj/
+*.o
+*.out
+a.out
+
+# Editor / OS files
+.vscode/
+.DS_Store
+
+# Static libs / shared
+*.a
+*.so
+
+# Test / coverage
+coverage/
