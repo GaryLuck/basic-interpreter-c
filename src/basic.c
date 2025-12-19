@@ -1,7 +1,7 @@
 // ...existing code...
 /*
   Tiny BASIC interpreter (single-file)
-  - Floating point variables A..Z
+  - Floating point variables A..Z, A0..Z9
   - Arrays via DIM A(n)
   - Statements: LET, PRINT, GOTO, IF ... THEN <lineno>, FOR/NEXT, END
   - CLI commands: LOAD <file>, SAVE <file>, LIST, RUN, NEW, QUIT
@@ -25,8 +25,9 @@ typedef struct {
 static Line program[MAX_LINES];
 static int program_count = 0;
 
-/* scalar variables A..Z */
-static double vars[26];
+/* scalar variables A..Z and A0..Z9 */
+#define NUM_VARS 286
+static double vars[NUM_VARS];
 /* arrays for A..Z */
 static double *arrays[26];
 static int arrays_size[26];
@@ -49,6 +50,20 @@ static char *trim(char *s) {
     char *e = s + strlen(s) - 1;
     while (e >= s && isspace((unsigned char)*e)) *e-- = '\0';
     return s;
+}
+
+static int parse_var_name(const char **s) {
+    if (!isalpha((unsigned char)**s)) return -1;
+    char letter = toupper((unsigned char)**s);
+    (*s)++;
+    int base = letter - 'A';
+    if (isdigit((unsigned char)**s)) {
+        int digit = **s - '0';
+        (*s)++;
+        return 26 + base * 10 + digit;
+    } else {
+        return base;
+    }
 }
 
 static int find_index_by_lineno(int ln) {
@@ -159,28 +174,32 @@ static double parse_factor(pc *s) {
         if (**s == ')') (*s)++;
         return v;
     } else if (isalpha((unsigned char)**s)) {
-        char name = toupper((unsigned char)**s);
-        (*s)++;
+        int var_index = parse_var_name(s);
+        if (var_index == -1) return 0.0;
         skip_spaces(s);
         if (**s == '(') {
-            /* array access */
+            /* array access, only for A-Z */
+            if (var_index >= 26) {
+                fprintf(stderr,"Runtime error: arrays only supported for A-Z\n");
+                return 0.0;
+            }
             (*s)++; /* consume '(' */
             int idx = (int)parse_expr(s);
             skip_spaces(s);
             if (**s == ')') (*s)++;
             if (idx < 0) return 0.0;
-            int id = name - 'A';
+            int id = var_index;
             if (!arrays[id]) {
-                fprintf(stderr,"Runtime error: array %c not DIM'd\n", name);
+                fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id);
                 return 0.0;
             }
             if (idx >= arrays_size[id]) {
-                fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", name, idx);
+                fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx);
                 return 0.0;
             }
             return arrays[id][idx];
         } else {
-            return vars[name - 'A'];
+            return vars[var_index];
         }
     } else {
         return parse_number(s);
@@ -257,22 +276,27 @@ static int run_statement(const char *text, int *next_index) {
     if (strncasecmp(s, "LET", 3) == 0 && isspace((unsigned char)s[3])) {
         s += 3; skip_spaces(&s);
         if (isalpha((unsigned char)*s)) {
-            char name = toupper((unsigned char)*s); s++;
+            int var_index = parse_var_name(&s);
+            if (var_index == -1) return -1;
             skip_spaces(&s);
             if (*s == '(') {
-                /* array assign */
+                /* array assign, only for A-Z */
+                if (var_index >= 26) {
+                    fprintf(stderr,"Runtime error: arrays only supported for A-Z\n");
+                    return -1;
+                }
                 s++; int idx = (int)parse_expr(&s); skip_spaces(&s); if (*s == ')') s++;
                 skip_spaces(&s); if (*s == '=') s++;
                 double val = parse_expr(&s);
-                int id = name - 'A';
-                if (!arrays[id]) { fprintf(stderr,"Runtime error: array %c not DIM'd\n", name); return -1; }
-                if (idx < 0 || idx >= arrays_size[id]) { fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", name, idx); return -1; }
+                int id = var_index;
+                if (!arrays[id]) { fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id); return -1; }
+                if (idx < 0 || idx >= arrays_size[id]) { fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx); return -1; }
                 arrays[id][idx] = val;
                 return 1;
             } else {
                 if (*s == '=') s++;
                 double val = parse_expr(&s);
-                vars[name - 'A'] = val;
+                vars[var_index] = val;
                 return 1;
             }
         }
@@ -305,7 +329,8 @@ static int run_statement(const char *text, int *next_index) {
     if (strncasecmp(s, "FOR", 3) == 0 && isspace((unsigned char)s[3])) {
         s += 3; skip_spaces(&s);
         if (!isalpha((unsigned char)*s)) { fprintf(stderr,"Syntax error in FOR\n"); return -1; }
-        char name = toupper((unsigned char)*s); s++;
+        int var_index = parse_var_name(&s);
+        if (var_index == -1) { fprintf(stderr,"Syntax error in FOR\n"); return -1; }
         skip_spaces(&s);
         if (*s == '=') s++;
         double start = parse_expr(&s);
@@ -320,7 +345,7 @@ static int run_statement(const char *text, int *next_index) {
             step = parse_expr(&s);
             if (step == 0.0) step = 1.0;
         }
-        vars[name - 'A'] = start;
+        vars[var_index] = start;
         if ((step > 0.0 && start > end) || (step < 0.0 && start < end)) {
             int next_line = find_matching_next(current_pc + 1);
             if (next_line >= 0) {
@@ -332,7 +357,7 @@ static int run_statement(const char *text, int *next_index) {
             }
         } else {
             if (for_sp >= MAX_FOR_DEPTH) { fprintf(stderr,"Runtime error: FOR stack overflow\n"); return -1; }
-            for_stack[for_sp].var = name - 'A';
+            for_stack[for_sp].var = var_index;
             for_stack[for_sp].end = end;
             for_stack[for_sp].step = step;
             for_stack[for_sp].for_pc = current_pc;
@@ -389,14 +414,14 @@ static int run_statement(const char *text, int *next_index) {
         s += 4; skip_spaces(&s);
         int var_index = -1;
         if (isalpha((unsigned char)*s)) {
-            var_index = toupper((unsigned char)*s) - 'A';
+            var_index = parse_var_name(&s);
         }
         if (for_sp == 0) { fprintf(stderr,"Runtime error: NEXT without FOR\n"); return -1; }
         int frame_index = for_sp - 1;
         if (var_index != -1) {
             /* require the top frame to match the variable */
             if (for_stack[frame_index].var != var_index) {
-                fprintf(stderr,"Runtime error: NEXT %c does not match FOR %c\n", 'A' + var_index, 'A' + for_stack[frame_index].var);
+                fprintf(stderr,"Runtime error: NEXT variable does not match FOR\n");
                 return -1;
             }
         }
@@ -417,21 +442,26 @@ static int run_statement(const char *text, int *next_index) {
 
     /* allow short assignment: A = expr or A(i) = expr */
     if (isalpha((unsigned char)*s)) {
-        char name = toupper((unsigned char)*s); s++;
+        int var_index = parse_var_name(&s);
+        if (var_index == -1) return -1;
         skip_spaces(&s);
         if (*s == '(') {
+            if (var_index >= 26) {
+                fprintf(stderr,"Runtime error: arrays only supported for A-Z\n");
+                return -1;
+            }
             s++; int idx = (int)parse_expr(&s); if (*s == ')') s++;
             skip_spaces(&s);
             if (*s == '=') { s++; double val = parse_expr(&s);
-                int id = name - 'A';
-                if (!arrays[id]) { fprintf(stderr,"Runtime error: array %c not DIM'd\n", name); return -1; }
-                if (idx < 0 || idx >= arrays_size[id]) { fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", name, idx); return -1; }
+                int id = var_index;
+                if (!arrays[id]) { fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id); return -1; }
+                if (idx < 0 || idx >= arrays_size[id]) { fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx); return -1; }
                 arrays[id][idx] = val;
                 return 1;
             }
         } else if (*s == '=') {
             s++; double val = parse_expr(&s);
-            vars[name - 'A'] = val;
+            vars[var_index] = val;
             return 1;
         }
     }
@@ -441,7 +471,7 @@ static int run_statement(const char *text, int *next_index) {
 
 static void run_program(void) {
     /* reset variables, arrays and FOR stack */
-    for (int i = 0; i < 26; ++i) vars[i] = 0;
+    for (int i = 0; i < NUM_VARS; ++i) vars[i] = 0;
     for (int i = 0; i < 26; ++i) { free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0; }
     for_sp = 0;
 
@@ -463,7 +493,8 @@ static void run_program(void) {
 static void do_new(void) {
     for (int i = 0; i < program_count; ++i) free(program[i].text);
     program_count = 0;
-    for (int i = 0; i < 26; ++i) { free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0; vars[i] = 0; }
+    for (int i = 0; i < NUM_VARS; ++i) vars[i] = 0;
+    for (int i = 0; i < 26; ++i) { free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0; }
     for_sp = 0;
 }
 
