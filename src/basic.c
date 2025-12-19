@@ -226,6 +226,24 @@ static int eval_condition(pc *s) {
     return left != 0.0;
 }
 
+static int find_matching_next(int start_pc) {
+    int count = 1; // starting after FOR
+    for (int i = start_pc; i < program_count; ++i) {
+        const char *text = program[i].text;
+        pc s = text;
+        skip_spaces(&s);
+        if (strncasecmp(s, "FOR", 3) == 0 && isspace((unsigned char)s[3])) {
+            count++;
+        } else if (strncasecmp(s, "NEXT", 4) == 0 && (s[4] == ' ' || s[4] == '\0')) {
+            count--;
+            if (count == 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
 /* Execute a single statement. Returns:
    1 = continue to next line
    2 = jump performed (next_index set)
@@ -303,17 +321,24 @@ static int run_statement(const char *text, int *next_index) {
             if (step == 0.0) step = 1.0;
         }
         vars[name - 'A'] = start;
-        if (for_sp >= MAX_FOR_DEPTH) { fprintf(stderr,"Runtime error: FOR stack overflow\n"); return -1; }
-        for_stack[for_sp].var = name - 'A';
-        for_stack[for_sp].end = end;
-        for_stack[for_sp].step = step;
-        for_stack[for_sp].for_pc = current_pc;
-        for_sp++;
-        /* If initial value already past end, do not enter loop: pop immediately */
-        if ((step > 0.0 && vars[name - 'A'] > end) || (step < 0.0 && vars[name - 'A'] < end)) {
-            for_sp--; /* pop */
+        if ((step > 0.0 && start > end) || (step < 0.0 && start < end)) {
+            int next_line = find_matching_next(current_pc + 1);
+            if (next_line >= 0) {
+                *next_index = next_line + 1;
+                return 2;
+            } else {
+                fprintf(stderr,"Runtime error: FOR without matching NEXT\n");
+                return -1;
+            }
+        } else {
+            if (for_sp >= MAX_FOR_DEPTH) { fprintf(stderr,"Runtime error: FOR stack overflow\n"); return -1; }
+            for_stack[for_sp].var = name - 'A';
+            for_stack[for_sp].end = end;
+            for_stack[for_sp].step = step;
+            for_stack[for_sp].for_pc = current_pc;
+            for_sp++;
+            return 1;
         }
-        return 1;
     }
 
     /* PRINT */
