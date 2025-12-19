@@ -3,7 +3,7 @@
   Tiny BASIC interpreter (single-file)
   - Floating point variables A..Z, A0..Z9
   - Arrays via DIM A(n)
-  - Statements: LET, PRINT, GOTO, IF ... THEN <lineno>, FOR/NEXT, END
+  - Statements: LET, PRINT, GOTO, IF ... THEN <lineno>, FOR/NEXT, GOSUB/RETURN, END
   - CLI commands: LOAD <file>, SAVE <file>, LIST, RUN, NEW, QUIT
   Build: gcc -std=c99 -O2 -o basic basic.c
 */
@@ -41,6 +41,10 @@ typedef struct {
 } ForFrame;
 static ForFrame for_stack[MAX_FOR_DEPTH];
 static int for_sp = 0;
+
+/* GOSUB return stack */
+static int gosub_stack[MAX_FOR_DEPTH];
+static int gosub_sp = 0;
 
 /* current program counter index (set by run_program before calling run_statement) */
 static int current_pc = 0;
@@ -440,6 +444,25 @@ static int run_statement(const char *text, int *next_index) {
         }
     }
 
+    /* GOSUB */
+    if (strncasecmp(s, "GOSUB", 5) == 0 && (s[5] == ' ' || s[5] == '\0')) {
+        s += 5; skip_spaces(&s);
+        int ln = atoi(s);
+        int idx = find_index_by_lineno(ln);
+        if (idx < 0) { fprintf(stderr,"Runtime error: GOSUB to %d not found\n", ln); return -1; }
+        if (gosub_sp >= MAX_FOR_DEPTH) { fprintf(stderr,"Runtime error: GOSUB stack overflow\n"); return -1; }
+        gosub_stack[gosub_sp++] = current_pc + 1;
+        *next_index = idx;
+        return 2;
+    }
+
+    /* RETURN */
+    if (strncasecmp(s, "RETURN", 6) == 0 && (s[6] == ' ' || s[6] == '\0')) {
+        if (gosub_sp == 0) { fprintf(stderr,"Runtime error: RETURN without GOSUB\n"); return -1; }
+        *next_index = gosub_stack[--gosub_sp];
+        return 2;
+    }
+
     /* allow short assignment: A = expr or A(i) = expr */
     if (isalpha((unsigned char)*s)) {
         int var_index = parse_var_name(&s);
@@ -474,6 +497,7 @@ static void run_program(void) {
     for (int i = 0; i < NUM_VARS; ++i) vars[i] = 0;
     for (int i = 0; i < 26; ++i) { free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0; }
     for_sp = 0;
+    gosub_sp = 0;
 
     if (program_count == 0) return;
     int pc = 0;
@@ -496,6 +520,7 @@ static void do_new(void) {
     for (int i = 0; i < NUM_VARS; ++i) vars[i] = 0;
     for (int i = 0; i < 26; ++i) { free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0; }
     for_sp = 0;
+    gosub_sp = 0;
 }
 
 static void strip_nl(char *s) {
