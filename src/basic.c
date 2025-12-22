@@ -3,7 +3,7 @@
   Tiny BASIC interpreter (single-file)
   - Floating point variables A..Z, A0..Z9
   - Arrays via DIM A(n)
-  - Statements: LET, PRINT, GOTO, IF ... THEN <lineno>, FOR/NEXT, GOSUB/RETURN, END
+  - Statements: LET, PRINT, GOTO, IF ... THEN <lineno>, FOR/NEXT, GOSUB/RETURN, END, DATA, READ
   - CLI commands: LOAD <file>, SAVE <file>, LIST, RUN, NEW, QUIT
   Build: gcc -std=c99 -O2 -o basic basic.c
 */
@@ -45,6 +45,12 @@ static int for_sp = 0;
 /* GOSUB return stack */
 static int gosub_stack[MAX_FOR_DEPTH];
 static int gosub_sp = 0;
+
+/* DATA storage for READ statements */
+#define MAX_DATA_VALUES 1000
+static double data_values[MAX_DATA_VALUES];
+static int data_count = 0;
+static int data_index = 0;  /* current position for READ */
 
 /* current program counter index (set by run_program before calling run_statement) */
 static int current_pc = 0;
@@ -151,6 +157,9 @@ static int save_file(const char *path) {
 */
 typedef const char *pc;
 
+/* Forward declarations */
+static double parse_expr(pc *s);
+
 static void skip_spaces(pc *s) {
     while (**s && isspace((unsigned char)**s)) (*s)++;
 }
@@ -162,8 +171,6 @@ static double parse_number(pc *s) {
     *s = end;
     return v;
 }
-
-static double parse_expr(pc *s);
 
 static double parse_factor(pc *s) {
     skip_spaces(s);
@@ -267,6 +274,34 @@ static int find_matching_next(int start_pc) {
     return -1;
 }
 
+/* Parse a DATA statement and add all values to the data pool */
+static void parse_data_statement(const char *text) {
+    pc s = text;
+    skip_spaces(&s);
+    /* skip "DATA" keyword */
+    if (strncasecmp(s, "DATA", 4) == 0) {
+        s += 4;
+    }
+    skip_spaces(&s);
+    /* parse comma-separated values - simple numbers only for DATA */
+    while (*s && data_count < MAX_DATA_VALUES) {
+        skip_spaces(&s);
+        if (*s == '\0') break;
+        
+        /* Parse a number or simple expression */
+        double value = parse_expr(&s);
+        data_values[data_count++] = value;
+        
+        skip_spaces(&s);
+        if (*s == ',') {
+            s++;
+            skip_spaces(&s);
+        } else {
+            break;
+        }
+    }
+}
+
 /* Execute a single statement. Returns:
    1 = continue to next line
    2 = jump performed (next_index set)
@@ -326,6 +361,12 @@ static int run_statement(const char *text, int *next_index) {
             if (*s == ',') { s++; skip_spaces(&s); continue; }
             break;
         }
+        return 1;
+    }
+
+    /* DATA */
+    if (strncasecmp(s, "DATA", 4) == 0 && (s[4] == ' ' || s[4] == '\0')) {
+        /* DATA statements are parsed during program initialization, just skip them */
         return 1;
     }
 
@@ -408,6 +449,32 @@ static int run_statement(const char *text, int *next_index) {
         }
         return 1;
     }
+    
+    /* READ */
+    if (strncasecmp(s, "READ", 4) == 0 && (s[4] == ' ' || s[4] == '\0')) {
+        s += 4; skip_spaces(&s);
+        while (1) {
+            if (!isalpha((unsigned char)*s)) break;
+            int var_index = parse_var_name(&s);
+            if (var_index == -1) return -1;
+            
+            if (data_index >= data_count) {
+                fprintf(stderr,"Runtime error: READ beyond available DATA\n");
+                return -1;
+            }
+            vars[var_index] = data_values[data_index++];
+            
+            skip_spaces(&s);
+            if (*s == ',') {
+                s++;
+                skip_spaces(&s);
+            } else {
+                break;
+            }
+        }
+        return 1;
+    }
+    
     /* END */
     if (strncasecmp(s, "END", 3) == 0) {
         return 0;
@@ -498,6 +565,18 @@ static void run_program(void) {
     for (int i = 0; i < 26; ++i) { free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0; }
     for_sp = 0;
     gosub_sp = 0;
+    
+    /* reset DATA pointer and collect all DATA statements */
+    data_index = 0;
+    data_count = 0;
+    for (int i = 0; i < program_count; ++i) {
+        const char *text = program[i].text;
+        pc s = text;
+        skip_spaces(&s);
+        if (strncasecmp(s, "DATA", 4) == 0 && (s[4] == ' ' || s[4] == '\0')) {
+            parse_data_statement(text);
+        }
+    }
 
     if (program_count == 0) return;
     int pc = 0;
