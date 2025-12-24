@@ -1,0 +1,7 @@
+10 DIM A%(10)
+20 FOR I% = 0 TO 5
+30 LET A%(I%) = I% * 10
+40 NEXT I%
+50 FOR I% = 0 TO 5
+60 PRINT A%(I%)
+70 NEXT I%

@@ -2,6 +2,7 @@
 /*
   Tiny BASIC interpreter (single-file)
   - Floating point variables A..Z, A0..Z9
+  - Integer variables A%..Z%, A0%..Z9% (GW-BASIC style)
   - Arrays via DIM A(n)
   - Statements: LET, PRINT, GOTO, IF ... THEN <lineno>, FOR/NEXT, GOSUB/RETURN, END, DATA, READ
   - CLI commands: LOAD <file>, SAVE <file>, LIST, RUN, NEW, QUIT
@@ -25,16 +26,21 @@ typedef struct {
 static Line program[MAX_LINES];
 static int program_count = 0;
 
-/* scalar variables A..Z and A0..Z9 */
+/* scalar variables A..Z and A0..Z9 (floating point) and A%..Z%, A0%..Z9% (integer) */
 #define NUM_VARS 286
-static double vars[NUM_VARS];
-/* arrays for A..Z */
+#define NUM_INT_VARS 286  /* parallel storage for integer variables */
+static double vars[NUM_VARS];  /* floating point variables */
+static int int_vars[NUM_INT_VARS];  /* integer variables */
+/* arrays for A..Z (floating point) */
 static double *arrays[26];
 static int arrays_size[26];
+/* arrays for A%..Z% (integer) */
+static int *int_arrays[26];
+static int int_arrays_size[26];
 
 /* FOR stack frame */
 typedef struct {
-    int var;        /* 0..25 */
+    int var;        /* 0..25 or 26..285, with 0x8000 flag for integer */
     double end;
     double step;
     int for_pc;     /* program index of FOR statement */
@@ -62,18 +68,40 @@ static char *trim(char *s) {
     return s;
 }
 
+/* Forward declaration */
+static int parse_var_name_full(const char **s, int *is_integer);
+
+/* Parse variable name. Returns:
+   0-25: A-Z (floating point)
+   26-285: A0-Z9 (floating point)
+   If *is_integer is not NULL, set to 1 for %, 0 otherwise
+*/
 static int parse_var_name(const char **s) {
+    return parse_var_name_full(s, NULL);
+}
+
+static int parse_var_name_full(const char **s, int *is_integer) {
     if (!isalpha((unsigned char)**s)) return -1;
     char letter = toupper((unsigned char)**s);
     (*s)++;
     int base = letter - 'A';
+    int var_index = base;
+    
     if (isdigit((unsigned char)**s)) {
         int digit = **s - '0';
         (*s)++;
-        return 26 + base * 10 + digit;
-    } else {
-        return base;
+        var_index = 26 + base * 10 + digit;
     }
+    
+    /* Check for integer suffix % */
+    int is_int = 0;
+    if (**s == '%') {
+        is_int = 1;
+        (*s)++;
+    }
+    
+    if (is_integer) *is_integer = is_int;
+    return var_index;
 }
 
 static int find_index_by_lineno(int ln) {
@@ -185,7 +213,8 @@ static double parse_factor(pc *s) {
         if (**s == ')') (*s)++;
         return v;
     } else if (isalpha((unsigned char)**s)) {
-        int var_index = parse_var_name(s);
+        int is_integer = 0;
+        int var_index = parse_var_name_full(s, &is_integer);
         if (var_index == -1) return 0.0;
         skip_spaces(s);
         if (**s == '(') {
@@ -200,17 +229,35 @@ static double parse_factor(pc *s) {
             if (**s == ')') (*s)++;
             if (idx < 0) return 0.0;
             int id = var_index;
-            if (!arrays[id]) {
-                fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id);
-                return 0.0;
+            if (is_integer) {
+                /* integer array */
+                if (!int_arrays[id]) {
+                    fprintf(stderr,"Runtime error: array %c%% not DIM'd\n", 'A' + id);
+                    return 0.0;
+                }
+                if (idx >= int_arrays_size[id]) {
+                    fprintf(stderr,"Runtime error: array %c%% index %d out of bounds\n", 'A' + id, idx);
+                    return 0.0;
+                }
+                return (double)int_arrays[id][idx];
+            } else {
+                /* floating point array */
+                if (!arrays[id]) {
+                    fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id);
+                    return 0.0;
+                }
+                if (idx >= arrays_size[id]) {
+                    fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx);
+                    return 0.0;
+                }
+                return arrays[id][idx];
             }
-            if (idx >= arrays_size[id]) {
-                fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx);
-                return 0.0;
-            }
-            return arrays[id][idx];
         } else {
-            return vars[var_index];
+            if (is_integer) {
+                return (double)int_vars[var_index];
+            } else {
+                return vars[var_index];
+            }
         }
     } else {
         return parse_number(s);
@@ -315,7 +362,8 @@ static int run_statement(const char *text, int *next_index) {
     if (strncasecmp(s, "LET", 3) == 0 && isspace((unsigned char)s[3])) {
         s += 3; skip_spaces(&s);
         if (isalpha((unsigned char)*s)) {
-            int var_index = parse_var_name(&s);
+            int is_integer = 0;
+            int var_index = parse_var_name_full(&s, &is_integer);
             if (var_index == -1) return -1;
             skip_spaces(&s);
             if (*s == '(') {
@@ -328,14 +376,24 @@ static int run_statement(const char *text, int *next_index) {
                 skip_spaces(&s); if (*s == '=') s++;
                 double val = parse_expr(&s);
                 int id = var_index;
-                if (!arrays[id]) { fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id); return -1; }
-                if (idx < 0 || idx >= arrays_size[id]) { fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx); return -1; }
-                arrays[id][idx] = val;
+                if (is_integer) {
+                    if (!int_arrays[id]) { fprintf(stderr,"Runtime error: array %c%% not DIM'd\n", 'A' + id); return -1; }
+                    if (idx < 0 || idx >= int_arrays_size[id]) { fprintf(stderr,"Runtime error: array %c%% index %d out of bounds\n", 'A' + id, idx); return -1; }
+                    int_arrays[id][idx] = (int)val;
+                } else {
+                    if (!arrays[id]) { fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id); return -1; }
+                    if (idx < 0 || idx >= arrays_size[id]) { fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx); return -1; }
+                    arrays[id][idx] = val;
+                }
                 return 1;
             } else {
                 if (*s == '=') s++;
                 double val = parse_expr(&s);
-                vars[var_index] = val;
+                if (is_integer) {
+                    int_vars[var_index] = (int)val;
+                } else {
+                    vars[var_index] = val;
+                }
                 return 1;
             }
         }
@@ -347,6 +405,11 @@ static int run_statement(const char *text, int *next_index) {
         while (1) {
             if (!isalpha((unsigned char)*s)) break;
             char name = toupper((unsigned char)*s); s++;
+            int is_integer = 0;
+            if (*s == '%') {
+                is_integer = 1;
+                s++;
+            }
             skip_spaces(&s);
             if (*s != '(') { fprintf(stderr,"Syntax error in DIM\n"); return -1; }
             s++;
@@ -354,9 +417,15 @@ static int run_statement(const char *text, int *next_index) {
             if (*s == ')') s++;
             if (size < 0) size = 0;
             int id = name - 'A';
-            free(arrays[id]);
-            arrays_size[id] = size + 1; /* allow 0..size */
-            arrays[id] = calloc((size_t)arrays_size[id], sizeof(double));
+            if (is_integer) {
+                free(int_arrays[id]);
+                int_arrays_size[id] = size + 1; /* allow 0..size */
+                int_arrays[id] = calloc((size_t)int_arrays_size[id], sizeof(int));
+            } else {
+                free(arrays[id]);
+                arrays_size[id] = size + 1; /* allow 0..size */
+                arrays[id] = calloc((size_t)arrays_size[id], sizeof(double));
+            }
             skip_spaces(&s);
             if (*s == ',') { s++; skip_spaces(&s); continue; }
             break;
@@ -374,7 +443,8 @@ static int run_statement(const char *text, int *next_index) {
     if (strncasecmp(s, "FOR", 3) == 0 && isspace((unsigned char)s[3])) {
         s += 3; skip_spaces(&s);
         if (!isalpha((unsigned char)*s)) { fprintf(stderr,"Syntax error in FOR\n"); return -1; }
-        int var_index = parse_var_name(&s);
+        int is_integer = 0;
+        int var_index = parse_var_name_full(&s, &is_integer);
         if (var_index == -1) { fprintf(stderr,"Syntax error in FOR\n"); return -1; }
         skip_spaces(&s);
         if (*s == '=') s++;
@@ -390,7 +460,11 @@ static int run_statement(const char *text, int *next_index) {
             step = parse_expr(&s);
             if (step == 0.0) step = 1.0;
         }
-        vars[var_index] = start;
+        if (is_integer) {
+            int_vars[var_index] = (int)start;
+        } else {
+            vars[var_index] = start;
+        }
         if ((step > 0.0 && start > end) || (step < 0.0 && start < end)) {
             int next_line = find_matching_next(current_pc + 1);
             if (next_line >= 0) {
@@ -402,7 +476,7 @@ static int run_statement(const char *text, int *next_index) {
             }
         } else {
             if (for_sp >= MAX_FOR_DEPTH) { fprintf(stderr,"Runtime error: FOR stack overflow\n"); return -1; }
-            for_stack[for_sp].var = var_index;
+            for_stack[for_sp].var = var_index | (is_integer ? 0x8000 : 0);  /* encode integer flag in high bit */
             for_stack[for_sp].end = end;
             for_stack[for_sp].step = step;
             for_stack[for_sp].for_pc = current_pc;
@@ -455,14 +529,19 @@ static int run_statement(const char *text, int *next_index) {
         s += 4; skip_spaces(&s);
         while (1) {
             if (!isalpha((unsigned char)*s)) break;
-            int var_index = parse_var_name(&s);
+            int is_integer = 0;
+            int var_index = parse_var_name_full(&s, &is_integer);
             if (var_index == -1) return -1;
             
             if (data_index >= data_count) {
                 fprintf(stderr,"Runtime error: READ beyond available DATA\n");
                 return -1;
             }
-            vars[var_index] = data_values[data_index++];
+            if (is_integer) {
+                int_vars[var_index] = (int)data_values[data_index++];
+            } else {
+                vars[var_index] = data_values[data_index++];
+            }
             
             skip_spaces(&s);
             if (*s == ',') {
@@ -484,31 +563,41 @@ static int run_statement(const char *text, int *next_index) {
     if (strncasecmp(s, "NEXT", 4) == 0 && (s[4] == ' ' || s[4] == '\0')) {
         s += 4; skip_spaces(&s);
         int var_index = -1;
+        int is_integer = 0;
         if (isalpha((unsigned char)*s)) {
-            var_index = parse_var_name(&s);
+            var_index = parse_var_name_full(&s, &is_integer);
         }
         if (for_sp == 0) { fprintf(stderr,"Runtime error: NEXT without FOR\n"); return -1; }
         int frame_index = for_sp - 1;
+        int frame_var = for_stack[frame_index].var;
+        int frame_is_int = (frame_var & 0x8000) ? 1 : 0;
+        int frame_var_index = frame_var & 0x7FFF;
         if (var_index != -1) {
             /* require the top frame to match the variable */
-            if (for_stack[frame_index].var != var_index) {
+            if (frame_var_index != var_index || frame_is_int != is_integer) {
                 fprintf(stderr,"Runtime error: NEXT variable does not match FOR\n");
                 return -1;
             }
         }
         /* operate on top frame */
         ForFrame *f = &for_stack[frame_index];
-        vars[f->var] += f->step;
-        /* check continuation */
-        if ((f->step > 0.0 && vars[f->var] <= f->end) || (f->step < 0.0 && vars[f->var] >= f->end)) {
-            /* jump back to line after FOR */
-            *next_index = f->for_pc + 1;
-            return 2;
+        if (frame_is_int) {
+            int_vars[frame_var_index] += (int)f->step;
+            double current = (double)int_vars[frame_var_index];
+            if ((f->step > 0.0 && current <= f->end) || (f->step < 0.0 && current >= f->end)) {
+                *next_index = f->for_pc + 1;
+                return 2;
+            }
         } else {
-            /* pop frame and continue */
-            for_sp--;
-            return 1;
+            vars[frame_var_index] += f->step;
+            if ((f->step > 0.0 && vars[frame_var_index] <= f->end) || (f->step < 0.0 && vars[frame_var_index] >= f->end)) {
+                *next_index = f->for_pc + 1;
+                return 2;
+            }
         }
+        /* pop frame and continue */
+        for_sp--;
+        return 1;
     }
 
     /* GOSUB */
@@ -532,7 +621,8 @@ static int run_statement(const char *text, int *next_index) {
 
     /* allow short assignment: A = expr or A(i) = expr */
     if (isalpha((unsigned char)*s)) {
-        int var_index = parse_var_name(&s);
+        int is_integer = 0;
+        int var_index = parse_var_name_full(&s, &is_integer);
         if (var_index == -1) return -1;
         skip_spaces(&s);
         if (*s == '(') {
@@ -544,14 +634,24 @@ static int run_statement(const char *text, int *next_index) {
             skip_spaces(&s);
             if (*s == '=') { s++; double val = parse_expr(&s);
                 int id = var_index;
-                if (!arrays[id]) { fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id); return -1; }
-                if (idx < 0 || idx >= arrays_size[id]) { fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx); return -1; }
-                arrays[id][idx] = val;
+                if (is_integer) {
+                    if (!int_arrays[id]) { fprintf(stderr,"Runtime error: array %c%% not DIM'd\n", 'A' + id); return -1; }
+                    if (idx < 0 || idx >= int_arrays_size[id]) { fprintf(stderr,"Runtime error: array %c%% index %d out of bounds\n", 'A' + id, idx); return -1; }
+                    int_arrays[id][idx] = (int)val;
+                } else {
+                    if (!arrays[id]) { fprintf(stderr,"Runtime error: array %c not DIM'd\n", 'A' + id); return -1; }
+                    if (idx < 0 || idx >= arrays_size[id]) { fprintf(stderr,"Runtime error: array %c index %d out of bounds\n", 'A' + id, idx); return -1; }
+                    arrays[id][idx] = val;
+                }
                 return 1;
             }
         } else if (*s == '=') {
             s++; double val = parse_expr(&s);
-            vars[var_index] = val;
+            if (is_integer) {
+                int_vars[var_index] = (int)val;
+            } else {
+                vars[var_index] = val;
+            }
             return 1;
         }
     }
@@ -561,8 +661,11 @@ static int run_statement(const char *text, int *next_index) {
 
 static void run_program(void) {
     /* reset variables, arrays and FOR stack */
-    for (int i = 0; i < NUM_VARS; ++i) vars[i] = 0;
-    for (int i = 0; i < 26; ++i) { free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0; }
+    for (int i = 0; i < NUM_VARS; ++i) { vars[i] = 0; int_vars[i] = 0; }
+    for (int i = 0; i < 26; ++i) { 
+        free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0;
+        free(int_arrays[i]); int_arrays[i] = NULL; int_arrays_size[i] = 0;
+    }
     for_sp = 0;
     gosub_sp = 0;
     
@@ -596,8 +699,11 @@ static void run_program(void) {
 static void do_new(void) {
     for (int i = 0; i < program_count; ++i) free(program[i].text);
     program_count = 0;
-    for (int i = 0; i < NUM_VARS; ++i) vars[i] = 0;
-    for (int i = 0; i < 26; ++i) { free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0; }
+    for (int i = 0; i < NUM_VARS; ++i) { vars[i] = 0; int_vars[i] = 0; }
+    for (int i = 0; i < 26; ++i) { 
+        free(arrays[i]); arrays[i] = NULL; arrays_size[i] = 0;
+        free(int_arrays[i]); int_arrays[i] = NULL; int_arrays_size[i] = 0;
+    }
     for_sp = 0;
     gosub_sp = 0;
 }

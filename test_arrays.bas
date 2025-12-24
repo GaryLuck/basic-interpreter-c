@@ -1,0 +1,12 @@
+10 DIM A(5)
+20 DIM B%(5)
+30 LET A(0) = 1.5
+40 LET A(1) = 2.5
+50 LET B%(0) = 10
+60 LET B%(1) = 20
+70 LET B%(2) = B%(0) + B%(1)
+80 PRINT A(0)
+90 PRINT A(1)
+100 PRINT B%(0)
+110 PRINT B%(1)
+120 PRINT B%(2)

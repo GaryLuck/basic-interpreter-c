@@ -1,0 +1,9 @@
+10 a%=3
+20 dim B%(5)
+30 for i%=a% to 5
+40 let b%(i%) = i%
+50 next i%
+60 for i%= 1 to 5
+70 print b%(i%)
+80 next i%
+90 edn

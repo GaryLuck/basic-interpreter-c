@@ -1,0 +1,4 @@
+10 LET A% = 100
+20 LET B% = 200
+30 LET C% = A% + B%
+40 PRINT C%
